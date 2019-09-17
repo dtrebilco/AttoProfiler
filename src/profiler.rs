@@ -96,18 +96,15 @@ mod internal {
             self.enabled = true;
         }
 
-        fn clean_json_str(io_str : &String)
-        {
-            let start_pos : usize = 0;
-            ///io_str.it
-
-            io_str.find(|c: char| (c == '\\') || (c == '"'))
-
-            while ((startPos = io_str.find_first_of("\\\"", startPos)) != std::string::npos)
-            {
-                io_str.insert(startPos, 1, '\\');
-                startPos += 2;
+        fn clean_json_str<'a>(io_str : &'a str, str_buffer : &'a mut String) -> &'a str {
+            // Check if there are any characters to replace
+            if io_str.find(|c: char| (c == '\\') || (c == '"')) == None {
+                return io_str;
             }
+
+            // Escape json protected characters (not fast, but should be rare)
+            *str_buffer = io_str.replace('\\', "\\\\").replace('"', "\\\"");
+            return str_buffer;
         }
 
         pub fn end(&mut self, w : &mut dyn Write) -> io::Result<()> {
@@ -123,7 +120,7 @@ mod internal {
             thread_stack.insert(thread::current().id(), Tags { index : 0, tags : vec!()});
 
             let mut first : bool = true;
-            let cleanTag : String;
+            let mut clean_buffer : String = String::new();
             w.write(b"{\"traceEvents\":[\n")?;
 
             for entry in self.records.iter()
@@ -156,6 +153,9 @@ mod internal {
                     w.write(b",\n")?;
                 }
                 first = false;
+
+                // Ensure escaped json is written
+                let tag = ProfileData::clean_json_str(tag, &mut clean_buffer);
 
                 // Get the microsecond count
                 //long long msCount = std::chrono::duration_cast<std::chrono::microseconds>(entry.m_time - g_pData->m_startTime).count();
