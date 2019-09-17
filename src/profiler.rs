@@ -56,6 +56,43 @@ mod internal {
         }  
     }
 
+    fn get_profile() ->  &'static Option<Mutex<ProfileData>> {
+        static INIT: Once = Once::new();
+        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
+
+        unsafe {
+            INIT.call_once(|| {
+                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
+            });
+            &GPROFILE
+        }  
+    }
+
+    fn get_profile2() ->  &'static Mutex<ProfileData> {
+        static INIT: Once = Once::new();
+        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
+
+        unsafe {
+            INIT.call_once(|| {
+                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
+            });
+            &GPROFILE.as_ref().unwrap()
+        }  
+    }
+
+    fn get_profile3() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
+        static INIT: Once = Once::new();
+        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
+
+        unsafe {
+            INIT.call_once(|| {
+                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
+            });
+            GPROFILE.as_ref().unwrap().try_lock()
+        }  
+    }
+
+
     impl ProfileData {
         pub fn profile_begin(&mut self, tag : &'static str) // DT_TODO: pass in thread id
         {
