@@ -3,6 +3,7 @@ mod internal {
 
     use std::sync::Mutex;
     use std::sync::Once;
+    use std::io;
     use std::io::Write;
     use std::thread::{self, ThreadId};
     use std::collections::HashMap;
@@ -95,11 +96,26 @@ mod internal {
             self.enabled = true;
         }
 
-        pub fn end(&mut self, w : &mut dyn Write) {
+        fn clean_json_str(io_str : &String)
+        {
+            let start_pos : usize = 0;
+            ///io_str.it
+
+            io_str.find(|c: char| (c == '\\') || (c == '"'))
+
+            while ((startPos = io_str.find_first_of("\\\"", startPos)) != std::string::npos)
+            {
+                io_str.insert(startPos, 1, '\\');
+                startPos += 2;
+            }
+        }
+
+        pub fn end(&mut self, w : &mut dyn Write) -> io::Result<()> {
             // Abort if already enabled
             if !self.enabled {
-                return;
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
+
             self.enabled = false;
 
             // DT_TODO: Parhaps use thread::current().name() ?
@@ -108,7 +124,7 @@ mod internal {
 
             let mut first : bool = true;
             let cleanTag : String;
-            w.write(b"{\"traceEvents\":[\n");
+            w.write(b"{\"traceEvents\":[\n")?;
 
             for entry in self.records.iter()
             {
@@ -116,8 +132,8 @@ mod internal {
                 let new_id = thread_stack.len();
                 let stack = thread_stack.entry(entry.thread_id).or_insert(Tags { index : new_id, tags : vec!()});
 
-                let mut tag = "Unknown";
-                let mut type_tag = "B";
+                let tag;
+                let type_tag;
                 match entry.tag {
                     TagType::Begin(s) => {
                         type_tag = "B"; 
@@ -129,12 +145,15 @@ mod internal {
                         if let Some(stack_tag) = stack.tags.pop() {
                             tag = stack_tag;
                         }
+                        else {
+                            tag = "Unknown";
+                        }
                     }
                 }
 
                 if !first
                 {
-                    w.write(b",\n");
+                    w.write(b",\n")?;
                 }
                 first = false;
 
@@ -143,8 +162,10 @@ mod internal {
 
                 // Format the string
                 write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,\"args\":{{}}}}",
-                    tag, type_tag, 0, stack.index);
+                    tag, type_tag, 0, stack.index)?;
             }
+            w.write(b"\n]\n}\n")?;
+            return Ok(());
 /*
 
   // Write thread "names"
@@ -170,8 +191,6 @@ mod internal {
         ",\"args\":{\"name\":\"Thread" << indexSpaceString << "_" << threadName << "\"}}";
     }
   }
-
-  o_outStream << "\n]\n}\n";
 */
 
         }          
