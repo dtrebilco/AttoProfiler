@@ -39,14 +39,15 @@ mod internal {
     use std::io::Write;
     use std::io;
     
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     use std::thread::{self, ThreadId};
     use std::collections::HashMap;
 
     enum TagType
     {
         Begin(&'static str),
-        End
+        End,
+        Complete(&'static str, u64) // A complete event holds a duration of the event
     }
 
     struct ProfileRecord {
@@ -73,6 +74,28 @@ mod internal {
                 records : vec![]
             }
         }    
+    }
+
+    pub struct ProfileScope {
+        name : &'static str,
+        time : Instant, 
+    }
+
+    impl ProfileScope {
+        pub fn new(name: &'static str) -> ProfileScope {
+            ProfileScope {
+                name, time : Instant::now(),
+            }
+        }
+    }
+
+    impl Drop for ProfileScope {
+        fn drop(&mut self) {
+            let duration = Instant::now().duration_since(self.time).as_micros() as u64;
+            if let Ok(ref mut profile) = get_profile() {
+                profile.add_record(ProfileRecord { time : self.time, thread_id : thread::current().id(), tag : TagType::Complete(self.name, duration) });
+            }            
+        }
     }
 
     fn run_on_profile(f : fn(&mut ProfileData)) {
@@ -104,6 +127,16 @@ mod internal {
     }
 
     impl ProfileData {
+        pub fn add_record(&mut self, record : ProfileRecord)
+        {
+            if !self.enabled || 
+               self.records.len() >= self.records.capacity()
+            {
+                return;
+            }
+            self.records.push(record);
+        }
+
         pub fn profile_begin(&mut self, tag : &'static str) // DT_TODO: pass in thread id
         {
             if !self.enabled || 
@@ -165,6 +198,7 @@ mod internal {
 
             let mut first : bool = true;
             let mut clean_buffer : String = String::new();
+            let mut duration_buffer : String = String::new();
             w.write(b"{\"traceEvents\":[\n")?;
 
             for entry in self.records.iter()
@@ -175,6 +209,7 @@ mod internal {
 
                 let tag;
                 let type_tag;
+                duration_buffer.clear();
                 match entry.tag {
                     TagType::Begin(s) => {
                         type_tag = "B"; 
@@ -190,6 +225,11 @@ mod internal {
                             tag = "Unknown";
                         }
                     }
+                    TagType::Complete(t, d) => {
+                        type_tag = "X"; 
+                        tag = t;
+                        duration_buffer = format!("\"dur\":{},", d);
+                    }                    
                 }
 
                 if !first
@@ -202,11 +242,11 @@ mod internal {
                 let tag = ProfileData::clean_json_str(tag, &mut clean_buffer);
 
                 // Get the microsecond count
-                let duration = entry.time.duration_since(self.start_time).as_micros();
+                let tag_time = entry.time.duration_since(self.start_time).as_micros() as u64;
 
                 // Format the string
-                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,\"args\":{{}}}}",
-                    tag, type_tag, duration, stack.index)?;
+                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,{}\"args\":{{}}}}",
+                    tag, type_tag, tag_time, stack.index, duration_buffer)?;
             }
             w.write(b"\n]\n}\n")?;
             return Ok(());
