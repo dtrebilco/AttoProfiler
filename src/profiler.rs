@@ -1,10 +1,44 @@
 
+use std::io::BufWriter;
+use std::io::Write;
+
+pub fn begin(tag_count : usize ) {
+    if let Ok(ref mut profile) = internal::get_profile3() {
+        profile.begin(tag_count);
+    }
+}
+
+pub fn profile_begin(tag : &'static str){
+    if let Ok(ref mut profile) = internal::get_profile3() {
+        profile.profile_begin(tag);
+    }
+}
+
+pub fn profile_end(){
+    if let Ok(ref mut profile) = internal::get_profile3() {
+        profile.profile_end();
+    }
+}
+
+pub fn end(writer : &mut dyn Write) -> std::io::Result<()> {
+    if let Ok(ref mut profile) = internal::get_profile3() {
+        profile.end(writer)?;
+    }
+    Ok(())
+}
+
+pub fn end_to_file(filename : &str) -> std::io::Result<()> {
+    end(&mut BufWriter::new(std::fs::File::create(filename)?))
+}
+
+
 mod internal {
 
     use std::sync::Mutex;
     use std::sync::Once;
-    use std::io;
     use std::io::Write;
+    use std::io;
+    
     use std::thread::{self, ThreadId};
     use std::collections::HashMap;
 
@@ -25,7 +59,7 @@ mod internal {
         tags : Vec<&'static str> // The tag stack
     }
 
-    struct ProfileData {
+    pub struct ProfileData {
         start_time : u64,        // The start time of the profile
         enabled : bool,   // If profiling is enabled
         records : Vec<ProfileRecord>, // The profiling records
@@ -80,18 +114,17 @@ mod internal {
         }  
     }
 
-    fn get_profile3() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
-        static INIT: Once = Once::new();
+    pub fn get_profile3() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
+        static INIT : Once = Once::new();
         static mut GPROFILE : Option<Mutex<ProfileData>> = None;
 
         unsafe {
             INIT.call_once(|| {
                 GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
             });
-            GPROFILE.as_ref().unwrap().try_lock()
+            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).try_lock()
         }  
     }
-
 
     impl ProfileData {
         pub fn profile_begin(&mut self, tag : &'static str) // DT_TODO: pass in thread id
