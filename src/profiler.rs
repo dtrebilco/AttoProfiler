@@ -3,25 +3,25 @@ use std::io::BufWriter;
 use std::io::Write;
 
 pub fn begin(tag_count : usize ) {
-    if let Ok(ref mut profile) = internal::get_profile3() {
+    if let Ok(ref mut profile) = internal::get_profile() {
         profile.begin(tag_count);
     }
 }
 
 pub fn profile_begin(tag : &'static str){
-    if let Ok(ref mut profile) = internal::get_profile3() {
+    if let Ok(ref mut profile) = internal::get_profile() {
         profile.profile_begin(tag);
     }
 }
 
 pub fn profile_end(){
-    if let Ok(ref mut profile) = internal::get_profile3() {
+    if let Ok(ref mut profile) = internal::get_profile() {
         profile.profile_end();
     }
 }
 
 pub fn end(writer : &mut dyn Write) -> std::io::Result<()> {
-    if let Ok(ref mut profile) = internal::get_profile3() {
+    if let Ok(ref mut profile) = internal::get_profile() {
         profile.end(writer)?;
     }
     Ok(())
@@ -39,6 +39,7 @@ mod internal {
     use std::io::Write;
     use std::io;
     
+    use std::time::{Duration, Instant};
     use std::thread::{self, ThreadId};
     use std::collections::HashMap;
 
@@ -49,25 +50,25 @@ mod internal {
     }
 
     struct ProfileRecord {
-        time : u64,            // The time of the profile data
+        time : Instant,        // The time of the profile data
         thread_id : ThreadId,  // The id of the thread
         tag : TagType,         // The tag used in profiling - if empty is an end event
     }
 
     struct Tags {
-        index : usize,             // The index of the thread
+        index : usize,           // The index of the thread
         tags : Vec<&'static str> // The tag stack
     }
 
     pub struct ProfileData {
-        start_time : u64,        // The start time of the profile
-        enabled : bool,   // If profiling is enabled
+        start_time : Instant,         // The start time of the profile
+        enabled : bool,               // If profiling is enabled
         records : Vec<ProfileRecord>, // The profiling records
     }
     impl ProfileData {
         pub fn new() -> ProfileData {
             ProfileData { 
-                start_time : 0,
+                start_time : Instant::now(),  
                 enabled : false,
                 records : vec![]
             }
@@ -90,31 +91,7 @@ mod internal {
         }  
     }
 
-    fn get_profile() ->  &'static Option<Mutex<ProfileData>> {
-        static INIT: Once = Once::new();
-        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
-
-        unsafe {
-            INIT.call_once(|| {
-                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
-            });
-            &GPROFILE
-        }  
-    }
-
-    fn get_profile2() ->  &'static Mutex<ProfileData> {
-        static INIT: Once = Once::new();
-        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
-
-        unsafe {
-            INIT.call_once(|| {
-                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
-            });
-            &GPROFILE.as_ref().unwrap()
-        }  
-    }
-
-    pub fn get_profile3() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
+    pub fn get_profile() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
         static INIT : Once = Once::new();
         static mut GPROFILE : Option<Mutex<ProfileData>> = None;
 
@@ -136,10 +113,7 @@ mod internal {
             }
 
             // Create the profile record
-            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::Begin(tag), time : 0 });
-
-            // Assign the time as the last possible thing
-            //self.records.last_mut().time = clock::now();
+            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::Begin(tag), time : Instant::now() });
         }
 
         pub fn profile_end(&mut self)
@@ -149,8 +123,8 @@ mod internal {
                 return;
             }
 
-            //newData.m_time = clock::now(); // Always get time as soon as possible
-            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::End, time : 0 });
+            let time = Instant::now(); // Always get time as soon as possible
+            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::End, time });
         }
 
         pub fn begin(&mut self, record_count : usize) {
@@ -161,7 +135,7 @@ mod internal {
 
             self.records.clear();
             self.records.reserve(record_count);
-            self.start_time = 1; // DT_TODO:
+            self.start_time = Instant::now();
 
             self.enabled = true;
         }
@@ -228,11 +202,11 @@ mod internal {
                 let tag = ProfileData::clean_json_str(tag, &mut clean_buffer);
 
                 // Get the microsecond count
-                //long long msCount = std::chrono::duration_cast<std::chrono::microseconds>(entry.m_time - g_pData->m_startTime).count();
+                let duration = entry.time.duration_since(self.start_time).as_micros();
 
                 // Format the string
                 write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,\"args\":{{}}}}",
-                    tag, type_tag, 0, stack.index)?;
+                    tag, type_tag, duration, stack.index)?;
             }
             w.write(b"\n]\n}\n")?;
             return Ok(());
