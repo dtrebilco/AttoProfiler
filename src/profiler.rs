@@ -3,28 +3,23 @@ use std::io::BufWriter;
 use std::io::Write;
 
 pub fn begin(tag_count : usize ) {
-    if let Ok(ref mut profile) = internal::get_profile() {
-        profile.begin(tag_count);
-    }
+    internal::begin(tag_count)
 }
 
 pub fn profile_begin(tag : &'static str){
-    if let Ok(ref mut profile) = internal::get_profile() {
-        profile.profile_begin(tag);
-    }
+    internal::profile_begin(tag)
 }
 
 pub fn profile_end(){
-    if let Ok(ref mut profile) = internal::get_profile() {
-        profile.profile_end();
-    }
+    internal::profile_end()
+}
+
+pub fn profile_scope(tag : &'static str) -> internal::ProfileScope {
+    internal::ProfileScope::new(tag)
 }
 
 pub fn end(writer : &mut dyn Write) -> std::io::Result<()> {
-    if let Ok(ref mut profile) = internal::get_profile() {
-        profile.end(writer)?;
-    }
-    Ok(())
+    internal::end(writer)
 }
 
 pub fn end_to_file(filename : &str) -> std::io::Result<()> {
@@ -73,7 +68,16 @@ mod internal {
                 enabled : false,
                 records : vec![]
             }
-        }    
+        }
+
+        fn add_record(&mut self, record : ProfileRecord) {
+            if !self.enabled || 
+               self.records.len() >= self.records.capacity()
+            {
+                return;
+            }
+            self.records.push(record);
+        }            
     }
 
     pub struct ProfileScope {
@@ -91,106 +95,68 @@ mod internal {
 
     impl Drop for ProfileScope {
         fn drop(&mut self) {
-            let duration = Instant::now().duration_since(self.time).as_micros() as u64;
+            let thread_id = thread::current().id();
             if let Ok(ref mut profile) = get_profile() {
-                profile.add_record(ProfileRecord { time : self.time, thread_id : thread::current().id(), tag : TagType::Complete(self.name, duration) });
+                if self.time < profile.start_time {
+                    self.time = profile.start_time; // If this scope started before profiling started
+                }
+                let duration = Instant::now().duration_since(self.time).as_micros() as u64;                    
+                profile.add_record(ProfileRecord { time : self.time, thread_id, tag : TagType::Complete(self.name, duration) });
             }            
         }
     }
 
-    fn run_on_profile(f : fn(&mut ProfileData)) {
-        static INIT: Once = Once::new();
-        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
-
-        unsafe {
-            INIT.call_once(|| {
-                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
-            });
-            if let Some(ref mut mutex) = GPROFILE {
-                if let Ok(ref mut profile) = mutex.try_lock() {
-                    f(profile);
-                }
-            }
-        }  
+    pub fn profile_begin(tag : &'static str)
+    {
+        let thread_id = thread::current().id();
+        if let Ok(ref mut profile) = get_profile() {
+            profile.add_record(ProfileRecord { thread_id, tag : TagType::Begin(tag), time : Instant::now() });
+        }            
     }
 
-    pub fn get_profile() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
-        static INIT : Once = Once::new();
-        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
-
-        unsafe {
-            INIT.call_once(|| {
-                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
-            });
-            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).try_lock()
-        }  
+    pub fn profile_end()
+    {
+        let time = Instant::now(); // Always get time as soon as possible
+        let thread_id = thread::current().id();
+        if let Ok(ref mut profile) = get_profile() {
+            profile.add_record(ProfileRecord { thread_id, tag : TagType::End, time });
+        }            
     }
 
-    impl ProfileData {
-        pub fn add_record(&mut self, record : ProfileRecord)
-        {
-            if !self.enabled || 
-               self.records.len() >= self.records.capacity()
-            {
-                return;
-            }
-            self.records.push(record);
-        }
-
-        pub fn profile_begin(&mut self, tag : &'static str) // DT_TODO: pass in thread id
-        {
-            if !self.enabled || 
-               self.records.len() >= self.records.capacity()
-            {
-                return;
-            }
-
-            // Create the profile record
-            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::Begin(tag), time : Instant::now() });
-        }
-
-        pub fn profile_end(&mut self)
-        {
-            if !self.enabled || 
-               self.records.len() >= self.records.capacity(){
-                return;
-            }
-
-            let time = Instant::now(); // Always get time as soon as possible
-            self.records.push(ProfileRecord { thread_id : thread::current().id(), tag : TagType::End, time });
-        }
-
-        pub fn begin(&mut self, record_count : usize) {
+    pub fn begin(record_count : usize) {
+        if let Ok(ref mut profile) = get_profile() {
             // Abort if already enabled
-            if self.enabled {
+            if profile.enabled {
                 return;
             }
 
-            self.records.clear();
-            self.records.reserve(record_count);
-            self.start_time = Instant::now();
+            profile.records.clear();
+            profile.records.reserve(record_count);
+            profile.start_time = Instant::now();
 
-            self.enabled = true;
+            profile.enabled = true;
+        }            
+    }
+
+    fn clean_json_str<'a>(io_str : &'a str, str_buffer : &'a mut String) -> &'a str {
+        // Check if there are any characters to replace
+        if io_str.find(|c: char| (c == '\\') || (c == '"')) == None {
+            return io_str;
         }
 
-        fn clean_json_str<'a>(io_str : &'a str, str_buffer : &'a mut String) -> &'a str {
-            // Check if there are any characters to replace
-            if io_str.find(|c: char| (c == '\\') || (c == '"')) == None {
-                return io_str;
-            }
+        // Escape json protected characters (not fast, but should be rare)
+        *str_buffer = io_str.replace('\\', "\\\\").replace('"', "\\\"");
+        return str_buffer;
+    }
 
-            // Escape json protected characters (not fast, but should be rare)
-            *str_buffer = io_str.replace('\\', "\\\\").replace('"', "\\\"");
-            return str_buffer;
-        }
-
-        pub fn end(&mut self, w : &mut dyn Write) -> io::Result<()> {
+    pub fn end(w : &mut dyn Write) -> io::Result<()> {
+        if let Ok(ref mut profile) = get_profile() {
             // Abort if already enabled
-            if !self.enabled {
+            if !profile.enabled {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
 
-            self.enabled = false;
+            profile.enabled = false;
 
             // DT_TODO: Parhaps use thread::current().name() ?
             let mut thread_stack = HashMap::new();
@@ -199,9 +165,9 @@ mod internal {
             let mut first : bool = true;
             let mut clean_buffer : String = String::new();
             let mut duration_buffer : String = String::new();
-            w.write(b"{\"traceEvents\":[\n")?;
 
-            for entry in self.records.iter()
+            w.write(b"{\"traceEvents\":[\n")?;
+            for entry in profile.records.iter()
             {
                 // Assign a unique index to each thread                
                 let new_id = thread_stack.len();
@@ -239,10 +205,10 @@ mod internal {
                 first = false;
 
                 // Ensure escaped json is written
-                let tag = ProfileData::clean_json_str(tag, &mut clean_buffer);
+                let tag = clean_json_str(tag, &mut clean_buffer);
 
                 // Get the microsecond count
-                let tag_time = entry.time.duration_since(self.start_time).as_micros() as u64;
+                let tag_time = entry.time.duration_since(profile.start_time).as_micros() as u64;
 
                 // Format the string
                 write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,{}\"args\":{{}}}}",
@@ -250,34 +216,46 @@ mod internal {
             }
             w.write(b"\n]\n}\n")?;
             return Ok(());
+        }
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
 /*
 
-  // Write thread "names"
-  if (!first)
-  {
-    for (auto& t : threadStack)
-    {
-      char indexString[64];
-      snprintf(indexString, sizeof(indexString), "%d", t.second.m_index);
+// Write thread "names"
+if (!first)
+{
+for (auto& t : threadStack)
+{
+    char indexString[64];
+    snprintf(indexString, sizeof(indexString), "%d", t.second.m_index);
 
-      // Sort thread listing by the time that they appear in the profile (tool sorts by name)
-      char indexSpaceString[64];
-      snprintf(indexSpaceString, sizeof(indexSpaceString), "%02d", t.second.m_index);
+    // Sort thread listing by the time that they appear in the profile (tool sorts by name)
+    char indexSpaceString[64];
+    snprintf(indexSpaceString, sizeof(indexSpaceString), "%02d", t.second.m_index);
 
-      // Ensure a clean json string
-      std::stringstream ss;
-      ss << t.first;
-      std::string threadName = ss.str();
-      CleanJsonStr(threadName);
+    // Ensure a clean json string
+    std::stringstream ss;
+    ss << t.first;
+    std::string threadName = ss.str();
+    CleanJsonStr(threadName);
 
-      o_outStream <<
-        ",\n{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":" << indexString <<
-        ",\"args\":{\"name\":\"Thread" << indexSpaceString << "_" << threadName << "\"}}";
-    }
-  }
+    o_outStream <<
+    ",\n{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":" << indexString <<
+    ",\"args\":{\"name\":\"Thread" << indexSpaceString << "_" << threadName << "\"}}";
+}
+}
 */
 
-        }          
-    }
+    }          
 
+    fn get_profile() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
+        static INIT : Once = Once::new();
+        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
+
+        unsafe {
+            INIT.call_once(|| {
+                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
+            });
+            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).try_lock()
+        }  
+    }
 }
