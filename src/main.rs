@@ -1,17 +1,19 @@
+use std::{thread, time};
 
 mod oldlib;
 mod profiler;
 
 fn main() {
 
-    profiler::begin(100_000);
-
+    profile_start!(100_000);
     {
-        let _scope = profiler::profile_scope("Test scope");
-        profiler::profile_begin("Test area");
-        profiler::profile_end();
+        profile_scope!("Test scope");
+
+        profile_begin!("Test area");
+        thread::sleep(time::Duration::from_millis(10));
+        profile_end!();
     }
-    profiler::end_to_file("test2.txt");
+    let _ = profile_finish_to_file!("test2.txt");
 
     open_trace_file!(".").unwrap();
     {

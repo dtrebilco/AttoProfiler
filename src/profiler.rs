@@ -1,37 +1,52 @@
 
-use std::io::BufWriter;
-use std::io::Write;
-
-pub fn begin(tag_count : usize ) {
-    internal::begin(tag_count)
+#[macro_export]
+macro_rules! profile_start {
+    ($tag_count: expr) => {
+        $crate::profiler::internal::begin($tag_count)
+    };
 }
 
-pub fn profile_begin(tag : &'static str){
-    internal::profile_begin(tag)
+#[macro_export]
+macro_rules! profile_finish {
+    ($writer: expr) => {
+        $crate::profiler::internal::end($writer)
+    };
 }
 
-pub fn profile_end(){
-    internal::profile_end()
+#[macro_export]
+macro_rules! profile_finish_to_file {
+    ($filename: expr) => {
+        $crate::profiler::internal::end_to_file($filename)
+    };
 }
 
-pub fn profile_scope(tag : &'static str) -> internal::ProfileScope {
-    internal::ProfileScope::new(tag)
+#[macro_export]
+macro_rules! profile_begin {
+    ($tag: expr) => {
+        $crate::profiler::internal::profile_begin($tag)
+    };
 }
 
-pub fn end(writer : &mut dyn Write) -> std::io::Result<()> {
-    internal::end(writer)
+#[macro_export]
+macro_rules! profile_end {
+    () => {
+        $crate::profiler::internal::profile_end()
+    };
 }
 
-pub fn end_to_file(filename : &str) -> std::io::Result<()> {
-    end(&mut BufWriter::new(std::fs::File::create(filename)?))
+#[macro_export]
+macro_rules! profile_scope {
+    ($tag: expr) => {
+        let _profile_guard = $crate::profiler::internal::ProfileScope::new($tag);
+    };
 }
 
-
-mod internal {
+pub mod internal {
 
     use std::sync::Mutex;
     use std::sync::Once;
     use std::io::Write;
+    use std::io::BufWriter;
     use std::io;
     
     use std::time::Instant;
@@ -147,6 +162,10 @@ mod internal {
         // Escape json protected characters (not fast, but should be rare)
         *str_buffer = io_str.replace('\\', "\\\\").replace('"', "\\\"");
         return str_buffer;
+    }
+
+    pub fn end_to_file(filename : &str) -> io::Result<()> {
+        end(&mut BufWriter::new(std::fs::File::create(filename)?))
     }
 
     pub fn end(w : &mut dyn Write) -> io::Result<()> {
