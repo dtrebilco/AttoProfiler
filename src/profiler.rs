@@ -279,7 +279,7 @@ for (auto& t : threadStack)
 
     }          
 
-    fn get_profile() -> std::sync::TryLockResult<std::sync::MutexGuard<'static, ProfileData>> {
+    fn get_profile() -> std::sync::LockResult<std::sync::MutexGuard<'static, ProfileData>> {
         static INIT : Once = Once::new();
         static mut GPROFILE : Option<Mutex<ProfileData>> = None;
 
@@ -287,7 +287,7 @@ for (auto& t : threadStack)
             INIT.call_once(|| {
                 GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
             });
-            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).try_lock()
+            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).lock()
         }  
     }
 }
