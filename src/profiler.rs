@@ -85,38 +85,51 @@ pub mod internal {
             }
         }
 
-        fn add_record(&mut self, record : ProfileRecord) {
+        fn add_record(&mut self, record : ProfileRecord) -> Option<usize> {
             if !self.enabled || 
                self.records.len() >= self.records.capacity()
             {
-                return;
+                return None;
             }
             self.records.push(record);
+            return Some(self.records.len() - 1);
         }            
     }
 
     pub struct ProfileScope {
-        name : &'static str,
-        time : Instant, 
+        index : Option<usize>,
+        time : Instant
     }
 
     impl ProfileScope {
         pub fn new(name: &'static str) -> ProfileScope {
-            ProfileScope {
-                name, time : Instant::now(),
-            }
+            let thread_id = thread::current().id();            
+
+            // Start as a begin tag
+            let mut ret = ProfileScope { index : None, time : Instant::now() };            
+            if let Ok(ref mut profile) = get_profile() {
+                ret.index = profile.add_record(ProfileRecord { time : ret.time, thread_id, tag : TagType::Begin(name) });
+            }            
+            ret
         }
     }
 
     impl Drop for ProfileScope {
         fn drop(&mut self) {
-            let thread_id = thread::current().id();
-            if let Ok(ref mut profile) = get_profile() {
-                if self.time < profile.start_time {
-                    self.time = profile.start_time; // If this scope started before profiling started
+            if let Some(index) = self.index {
+                if let Ok(ref mut profile) = get_profile() {
+                    if index < profile.records.len() {
+                        let record = &mut profile.records[index];
+                        if let TagType::Begin(name) = record.tag {
+                            if self.time == record.time {
+                                // If the time is different, it must have started in a different profile session
+                                // Change the tag type to complete
+                                let duration = Instant::now().duration_since(record.time).as_micros() as u64;                            
+                                record.tag = TagType::Complete(name, duration);
+                            }
+                        }
+                    }
                 }
-                let duration = Instant::now().duration_since(self.time).as_micros() as u64;                    
-                profile.add_record(ProfileRecord { time : self.time, thread_id, tag : TagType::Complete(self.name, duration) });
             }            
         }
     }
