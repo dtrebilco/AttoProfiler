@@ -230,7 +230,7 @@ pub mod internal {
                 let tag_time = entry.time.duration_since(profile.start_time).as_micros() as u64;
 
                 // Format the string
-                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\": {},\"tid\":{},\"cat\":\"\",\"pid\":0,{}\"args\":{{}}}}",
+                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":{},{}\"pid\":0}}",
                     tag, type_tag, tag_time, stack.index, duration_buffer)?;
             }
             w.write(b"\n]\n}\n")?;
