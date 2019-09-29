@@ -41,25 +41,35 @@ macro_rules! profile_scope {
     };
 }
 
+#[macro_export]
+macro_rules! use_profile_memory_allocator {
+    () => {
+        #[global_allocator]
+        static A: $crate::profiler::internal::MemTrackAllocator = $crate::profiler::internal::MemTrackAllocator;
+    };
+}
+
 pub mod internal {
 
-    use std::sync::Mutex;
-    use std::sync::Once;
-    use std::io::Write;
-    use std::io::BufWriter;
     use std::io;
-    
+    use std::io::{Write, BufWriter};
+    use std::alloc::{System, GlobalAlloc, Layout};
+
     use std::time::Instant;
+    use std::sync::{Once, Mutex};
     use std::thread::{self, ThreadId};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::collections::HashMap;
 
     enum TagType
     {
         Begin(&'static str),
         End,
-        Complete(&'static str, u64) // A complete event holds a duration of the event
+        Complete(&'static str, u64), // A complete event holds a duration of the event
+        Allocate(usize),
+        Deallocate(usize)
     }
-
+ 
     struct ProfileRecord {
         time : Instant,        // The time of the profile data
         thread_id : ThreadId,  // The id of the thread
@@ -134,6 +144,44 @@ pub mod internal {
         }
     }
 
+    pub struct MemTrackAllocator;
+    static TRACK_ALLOCS : AtomicBool = AtomicBool::new(false);
+    impl MemTrackAllocator
+    {
+        pub fn set_mem_tracking(new_val : bool) {
+            TRACK_ALLOCS.store(new_val, Ordering::SeqCst);
+        }
+        pub fn get_mem_tracking() -> bool {
+            TRACK_ALLOCS.load(Ordering::SeqCst)
+        }
+    }
+
+    unsafe impl GlobalAlloc for MemTrackAllocator {
+        unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
+            if MemTrackAllocator::get_mem_tracking() {
+                // Have to be careful here to not do anything that can allocate/deallocate
+                let time = Instant::now();
+                let thread_id = thread::current().id();
+                if let Ok(ref mut profile) = get_profile() {
+                    profile.add_record(ProfileRecord { thread_id, tag : TagType::Allocate(_layout.size()), time });
+                }            
+            }
+            System.alloc(_layout) 
+        }
+
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+            if MemTrackAllocator::get_mem_tracking() {
+                // Have to be careful here to not do anything that can allocate/deallocate                
+                let time = Instant::now();
+                let thread_id = thread::current().id();
+                if let Ok(ref mut profile) = get_profile() {
+                    profile.add_record(ProfileRecord { thread_id, tag : TagType::Deallocate(_layout.size()), time });
+                }             
+            }
+            System.dealloc(_ptr, _layout)
+        }
+    }
+
     pub fn profile_begin(tag : &'static str)
     {
         let thread_id = thread::current().id();
@@ -163,6 +211,7 @@ pub mod internal {
             profile.start_time = Instant::now();
 
             profile.enabled = true;
+            MemTrackAllocator::set_mem_tracking(true);
         }            
     }
 
@@ -178,10 +227,12 @@ pub mod internal {
     }
 
     pub fn end_to_file(filename : &str) -> io::Result<()> {
+        MemTrackAllocator::set_mem_tracking(false);
         end(&mut BufWriter::new(std::fs::File::create(filename)?))
     }
 
     pub fn end(w : &mut dyn Write) -> io::Result<()> {
+        MemTrackAllocator::set_mem_tracking(false);
         if let Ok(ref mut profile) = get_profile() {
             // Abort if already enabled
             if !profile.enabled {
@@ -196,7 +247,7 @@ pub mod internal {
 
             let mut first : bool = true;
             let mut clean_buffer : String = String::new();
-            let mut duration_buffer : String = String::new();
+            let mut extra_buffer : String = String::new();
 
             w.write(b"{\"traceEvents\":[\n")?;
             for entry in profile.records.iter()
@@ -207,7 +258,7 @@ pub mod internal {
 
                 let tag;
                 let type_tag;
-                duration_buffer.clear();
+                extra_buffer.clear();
                 match entry.tag {
                     TagType::Begin(s) => {
                         type_tag = "B"; 
@@ -226,8 +277,18 @@ pub mod internal {
                     TagType::Complete(t, d) => {
                         type_tag = "X"; 
                         tag = t;
-                        duration_buffer = format!("\"dur\":{},", d);
-                    }                    
+                        extra_buffer = format!(",\"dur\":{}", d);
+                    }
+                    TagType::Allocate(a) => {
+                        type_tag = "O"; 
+                        tag = "Allocate";
+                        extra_buffer = format!(",\"id\":0,\"args\":{{\"snapshot\":{{\"amount\":{}}}}}", a);
+                    }                                        
+                    TagType::Deallocate(a) => {
+                        type_tag = "O"; 
+                        tag = "Deallocate";
+                        extra_buffer = format!(",\"id\":1,\"args\":{{\"snapshot\":{{\"amount\":{}}}}}", a);                        
+                    }                                        
                 }
 
                 if !first
@@ -243,8 +304,8 @@ pub mod internal {
                 let tag_time = entry.time.duration_since(profile.start_time).as_micros() as u64;
 
                 // Format the string
-                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":{},{}\"pid\":0}}",
-                    tag, type_tag, tag_time, stack.index, duration_buffer)?;
+                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":{},\"pid\":0{}}}",
+                    tag, type_tag, tag_time, stack.index, extra_buffer)?;
             }
             w.write(b"\n]\n}\n")?;
             return Ok(());
