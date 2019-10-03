@@ -49,6 +49,57 @@ macro_rules! use_profile_memory_allocator {
     };
 }
 
+#[cfg(windows)]
+mod sys {
+    use std::mem;    
+    use winapi::um::winnt::*;
+    use winapi::um::profileapi::*;
+
+    struct TimePoint(i64);
+    struct StopWatch {
+        frequency : i64
+    }
+
+    impl StopWatch {
+        pub fn new() -> StopWatch {
+            let frequency;
+            unsafe {
+                let mut l : LARGE_INTEGER = mem::zeroed();
+                QueryPerformanceFrequency(&mut l);
+                frequency = *l.QuadPart();
+            }
+
+            StopWatch { 
+                frequency
+            }
+        }        
+
+        pub fn get_time() -> TimePoint {
+            unsafe {
+                let mut l : LARGE_INTEGER = mem::zeroed();                
+                QueryPerformanceCounter(&mut l);
+                TimePoint(*l.QuadPart())
+            }
+        }
+
+        pub fn get_milliseconds(&self, a : &TimePoint, b : &TimePoint) -> i64 {
+            mul_div_i64(b.0 - a.0, 1000_000, self.frequency)
+        }
+    }
+
+    // Computes (value*numer)/denom without overflow, as long as both
+    // (numer*denom) and the overall result fit into i64 (which is the case
+    // for our time conversions).
+    pub fn mul_div_i64(value: i64, numer: i64, denom: i64) -> i64 {
+        let q = value / denom;
+        let r = value % denom;
+        // Decompose value as (value/denom*denom + value%denom),
+        // substitute into (value*numer)/denom and simplify.
+        // r < denom, so (denom*numer) is the upper bound of (r*numer)
+        q * numer + r * numer / denom
+    }
+}
+
 pub mod internal {
 
     use std::io;
