@@ -51,12 +51,18 @@ macro_rules! use_profile_memory_allocator {
 
 #[cfg(windows)]
 mod sys {
-    use std::mem;    
+    use std::mem;
+    use std::cell::UnsafeCell;    
     use winapi::um::winnt::*;
     use winapi::um::profileapi::*;
+    use winapi::um::synchapi::*;
+    use winapi::um::minwinbase::*;
+    use winapi::um::processthreadsapi::*;
+    use std::ops::{Deref, DerefMut};
 
-    struct TimePoint(i64);
-    struct StopWatch {
+    #[derive(PartialEq, Clone, Copy)]
+    pub struct TimePoint(i64);
+    pub struct StopWatch {
         frequency : i64
     }
 
@@ -87,6 +93,92 @@ mod sys {
         }
     }
 
+    pub fn get_thread_id() -> u32 {
+        unsafe { GetCurrentThreadId() }
+    }
+
+    pub struct ReentrantMutex<T: ?Sized> {
+         inner : Box<CRITICAL_SECTION>,
+         lock_count : u32,
+         data: UnsafeCell<T>
+    }
+    pub struct MutexGuard<'a, T: ?Sized + 'a> {
+        // funny underscores due to how Deref/DerefMut currently work (they
+        // disregard field privacy).
+        __lock: &'a mut ReentrantMutex<T>
+    }
+
+    impl<T> ReentrantMutex<T> {
+        pub fn new(t: T) -> ReentrantMutex<T> {
+            unsafe {
+                let mut ret = ReentrantMutex {
+                     inner: Box::new(mem::zeroed()),
+                     lock_count : 0, 
+                     data: UnsafeCell::new(t) 
+                };
+                InitializeCriticalSection(&mut *ret.inner);
+                ret
+            }
+        }
+    }
+
+    impl<T: ?Sized> Drop for ReentrantMutex<T> {
+        fn drop(&mut self) {
+            unsafe {
+                DeleteCriticalSection(&mut *self.inner);
+            }
+        }
+    }
+
+    impl<'mutex, T: ?Sized> MutexGuard<'mutex, T> {
+        pub fn new(lock: &'mutex mut ReentrantMutex<T>) -> Result<MutexGuard<'mutex, T>,()> {
+            unsafe {
+                EnterCriticalSection(&mut *lock.inner);
+                lock.lock_count += 1;
+                Ok(MutexGuard { __lock: lock })
+            }
+        }
+    }
+
+    impl<'mutex, T: ?Sized> MutexGuard<'mutex, T> {
+        pub fn new_no_recurse(lock: &'mutex mut ReentrantMutex<T>) -> Result<MutexGuard<'mutex, T>,()> {
+            unsafe {
+                EnterCriticalSection(&mut *lock.inner);
+                if lock.lock_count > 0 {
+                    LeaveCriticalSection(&mut *lock.inner);
+                    return Err(());
+                }
+
+                lock.lock_count += 1;
+                Ok(MutexGuard { __lock: lock })
+            }
+        }
+    }
+
+    impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+        #[inline]
+        fn drop(&mut self) {
+            unsafe {
+                self.__lock.lock_count -= 1;
+                LeaveCriticalSection(&mut *self.__lock.inner);
+            }
+        }
+    }
+
+    impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+        type Target = T;
+
+        fn deref(&self) -> &T {
+            unsafe { &*self.__lock.data.get() }
+        }
+    }
+
+    impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut T {
+            unsafe { &mut *self.__lock.data.get() }
+        }
+    }
+
     // Computes (value*numer)/denom without overflow, as long as both
     // (numer*denom) and the overall result fit into i64 (which is the case
     // for our time conversions).
@@ -101,14 +193,13 @@ mod sys {
 }
 
 pub mod internal {
+    use super::sys;
 
     use std::io;
     use std::io::{Write, BufWriter};
     use std::alloc::{System, GlobalAlloc, Layout};
 
-    use std::time::Instant;
-    use std::sync::{Once, Mutex};
-    use std::thread::{self, ThreadId};
+    use std::sync::Once;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::collections::HashMap;
 
@@ -116,14 +207,14 @@ pub mod internal {
     {
         Begin(&'static str),
         End,
-        Complete(&'static str, u64), // A complete event holds a duration of the event
+        Complete(&'static str, i64), // A complete event holds a duration of the event
         Allocate(usize),
         Deallocate(usize)
     }
  
     struct ProfileRecord {
-        time : Instant,        // The time of the profile data
-        thread_id : ThreadId,  // The id of the thread
+        time : sys::TimePoint,        // The time of the profile data
+        thread_id : u32,  // The id of the thread
         tag : TagType,         // The tag used in profiling - if empty is an end event
     }
 
@@ -133,14 +224,16 @@ pub mod internal {
     }
 
     pub struct ProfileData {
-        start_time : Instant,         // The start time of the profile
+        stopwatch : sys::StopWatch,
+        start_time : sys::TimePoint,         // The start time of the profile
         enabled : bool,               // If profiling is enabled
         records : Vec<ProfileRecord>, // The profiling records
     }
     impl ProfileData {
         pub fn new() -> ProfileData {
-            ProfileData { 
-                start_time : Instant::now(),  
+            ProfileData {
+                stopwatch : sys::StopWatch::new(), 
+                start_time : sys::StopWatch::get_time(),  
                 enabled : false,
                 records : vec![]
             }
@@ -159,15 +252,15 @@ pub mod internal {
 
     pub struct ProfileScope {
         index : Option<usize>,
-        time : Instant
+        time : sys::TimePoint
     }
 
     impl ProfileScope {
         pub fn new(name: &'static str) -> ProfileScope {
-            let thread_id = thread::current().id();            
+            let thread_id = sys::get_thread_id();            
 
             // Start as a begin tag
-            let mut ret = ProfileScope { index : None, time : Instant::now() };            
+            let mut ret = ProfileScope { index : None, time : sys::StopWatch::get_time() };            
             if let Ok(ref mut profile) = get_profile() {
                 ret.index = profile.add_record(ProfileRecord { time : ret.time, thread_id, tag : TagType::Begin(name) });
             }            
@@ -180,12 +273,12 @@ pub mod internal {
             if let Some(index) = self.index {
                 if let Ok(ref mut profile) = get_profile() {
                     if index < profile.records.len() {
+                        let duration = profile.stopwatch.get_milliseconds(&profile.records[index].time, &sys::StopWatch::get_time());                           
                         let record = &mut profile.records[index];
                         if let TagType::Begin(name) = record.tag {
                             if self.time == record.time {
                                 // If the time is different, it must have started in a different profile session
                                 // Change the tag type to complete
-                                let duration = Instant::now().duration_since(record.time).as_micros() as u64;                            
                                 record.tag = TagType::Complete(name, duration);
                             }
                         }
@@ -210,10 +303,9 @@ pub mod internal {
     unsafe impl GlobalAlloc for MemTrackAllocator {
         unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
             if MemTrackAllocator::get_mem_tracking() {
-                // Have to be careful here to not do anything that can allocate/deallocate
-                let time = Instant::now();
-                let thread_id = thread::current().id();
-                if let Ok(ref mut profile) = get_profile() {
+                if let Ok(ref mut profile) = get_profile_no_recurse() {                
+                    let time = sys::StopWatch::get_time();
+                    let thread_id = sys::get_thread_id();
                     profile.add_record(ProfileRecord { thread_id, tag : TagType::Allocate(_layout.size()), time });
                 }            
             }
@@ -222,10 +314,9 @@ pub mod internal {
 
         unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
             if MemTrackAllocator::get_mem_tracking() {
-                // Have to be careful here to not do anything that can allocate/deallocate                
-                let time = Instant::now();
-                let thread_id = thread::current().id();
-                if let Ok(ref mut profile) = get_profile() {
+                if let Ok(ref mut profile) = get_profile_no_recurse() {                                
+                    let time = sys::StopWatch::get_time();
+                    let thread_id = sys::get_thread_id();
                     profile.add_record(ProfileRecord { thread_id, tag : TagType::Deallocate(_layout.size()), time });
                 }             
             }
@@ -235,16 +326,16 @@ pub mod internal {
 
     pub fn profile_begin(tag : &'static str)
     {
-        let thread_id = thread::current().id();
+        let thread_id = sys::get_thread_id();
         if let Ok(ref mut profile) = get_profile() {
-            profile.add_record(ProfileRecord { thread_id, tag : TagType::Begin(tag), time : Instant::now() });
+            profile.add_record(ProfileRecord { thread_id, tag : TagType::Begin(tag), time : sys::StopWatch::get_time() });
         }            
     }
 
     pub fn profile_end()
     {
-        let time = Instant::now(); // Always get time as soon as possible
-        let thread_id = thread::current().id();
+        let time = sys::StopWatch::get_time(); // Always get time as soon as possible
+        let thread_id = sys::get_thread_id();
         if let Ok(ref mut profile) = get_profile() {
             profile.add_record(ProfileRecord { thread_id, tag : TagType::End, time });
         }            
@@ -259,7 +350,7 @@ pub mod internal {
 
             profile.records.clear();
             profile.records.reserve(record_count);
-            profile.start_time = Instant::now();
+            profile.start_time = sys::StopWatch::get_time();
 
             profile.enabled = true;
             MemTrackAllocator::set_mem_tracking(true);
@@ -294,7 +385,7 @@ pub mod internal {
 
             // DT_TODO: Parhaps use thread::current().name() ?
             let mut thread_stack = HashMap::new();
-            thread_stack.insert(thread::current().id(), Tags { index : 0, tags : vec!()});
+            thread_stack.insert(sys::get_thread_id(), Tags { index : 0, tags : vec!()});
 
             let mut first : bool = true;
             let mut clean_buffer : String = String::new();
@@ -352,7 +443,7 @@ pub mod internal {
                 let tag = clean_json_str(tag, &mut clean_buffer);
 
                 // Get the microsecond count
-                let tag_time = entry.time.duration_since(profile.start_time).as_micros() as u64;
+                let tag_time = profile.stopwatch.get_milliseconds(&profile.start_time, &entry.time);
 
                 // Format the string
                 write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":{},\"pid\":0{}}}",
@@ -391,15 +482,24 @@ for (auto& t : threadStack)
 
     }          
 
-    fn get_profile() -> std::sync::LockResult<std::sync::MutexGuard<'static, ProfileData>> {
+    fn get_profile_mutex() -> &'static mut sys::ReentrantMutex<ProfileData> {
         static INIT : Once = Once::new();
-        static mut GPROFILE : Option<Mutex<ProfileData>> = None;
+        static mut GPROFILE : Option<sys::ReentrantMutex<ProfileData>> = None;
 
         unsafe {
             INIT.call_once(|| {
-                GPROFILE = Option::Some(Mutex::new(ProfileData::new()));
+                GPROFILE = Option::Some(sys::ReentrantMutex::new(ProfileData::new()));
             });
-            GPROFILE.as_ref().unwrap_or_else(|| {std::hint::unreachable_unchecked()}).lock()
+            GPROFILE.as_mut().unwrap_or_else(|| {std::hint::unreachable_unchecked()})
         }  
     }
+
+    fn get_profile() -> Result<sys::MutexGuard<'static, ProfileData>, ()> {
+        sys::MutexGuard::new(get_profile_mutex())
+    }
+
+    fn get_profile_no_recurse() -> Result<sys::MutexGuard<'static, ProfileData>, ()> {
+        sys::MutexGuard::new_no_recurse(get_profile_mutex())
+    }
+
 }
