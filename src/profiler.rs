@@ -272,13 +272,14 @@ pub mod internal {
         fn drop(&mut self) {
             if let Some(index) = self.index {
                 if let Ok(ref mut profile) = get_profile() {
+                    let profile = profile.deref_mut();                    
                     if index < profile.records.len() {
-                        let duration = profile.stopwatch.get_milliseconds(&profile.records[index].time, &sys::StopWatch::get_time());                           
                         let record = &mut profile.records[index];
                         if let TagType::Begin(name) = record.tag {
                             if self.time == record.time {
                                 // If the time is different, it must have started in a different profile session
                                 // Change the tag type to complete
+                                let duration = profile.stopwatch.get_milliseconds(&record.time, &sys::StopWatch::get_time());
                                 record.tag = TagType::Complete(name, duration);
                             }
                         }
