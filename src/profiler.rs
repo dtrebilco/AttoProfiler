@@ -57,8 +57,12 @@ mod sys {
     use winapi::um::profileapi::*;
     use winapi::um::synchapi::*;
     use winapi::um::minwinbase::*;
+    use winapi::um::dbghelp::*;
     use winapi::um::processthreadsapi::*;
     use std::ops::{Deref, DerefMut};
+    use winapi::shared::minwindef::{
+        TRUE, BOOL, DWORD, HMODULE, LPDWORD, PDWORD, PUCHAR, PULONG, UCHAR, ULONG, USHORT, WORD,
+    };
 
     #[derive(PartialEq, Clone, Copy)]
     pub struct TimePoint(i64);
@@ -190,10 +194,50 @@ mod sys {
         // r < denom, so (denom*numer) is the upper bound of (r*numer)
         q * numer + r * numer / denom
     }
+/*
+    pub unsafe fn trace(cb: &mut FnMut(&super::Frame) -> bool) {
+        // Allocate necessary structures for doing the stack walk
+        let process = GetCurrentProcess();
+        let thread = GetCurrentThread();
+
+        let mut context = mem::zeroed::<MyContext>();
+        RtlCaptureContext(&mut context.0);
+
+        // Attempt to use `StackWalkEx` if we can, but fall back to `StackWalk64`
+        // since it's in theory supported on more systems.
+        let mut frame = super::Frame {
+            inner: Frame::New(mem::zeroed()),
+        };
+        let image = init_frame(&mut frame.inner, &context.0);
+        let frame_ptr = match &mut frame.inner {
+            Frame::New(ptr) => ptr as *mut STACKFRAME_EX,
+            _ => unreachable!(),
+        };
+
+        while StackWalkEx(
+            image as DWORD,
+            process,
+            thread,
+            frame_ptr,
+            &mut context.0 as *mut CONTEXT as *mut _,
+            None,
+            Some(SymFunctionTableAccess64()),
+            Some(SymGetModuleBase64()),
+            None,
+            0,
+        ) == TRUE
+        {
+            if !cb(&frame) {
+                break;
+            }
+        }
+    }
+*/
 }
 
 pub mod internal {
     use super::sys;
+    use backtrace::*;
 
     use std::io;
     use std::io::{Write, BufWriter};
@@ -202,6 +246,7 @@ pub mod internal {
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::collections::HashMap;
+    use std::ops::DerefMut;
 
     enum TagType
     {
@@ -305,6 +350,11 @@ pub mod internal {
         unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
             if MemTrackAllocator::get_mem_tracking() {
                 if let Ok(ref mut profile) = get_profile_no_recurse() {                
+                    //let bt = Backtrace::new_unresolved();
+                    //println!("Stack {:?}", bt);
+                    backtrace::trace_unsynchronized(|frame| { true });
+                    //backtrace::trace(|frame| { true });
+
                     let time = sys::StopWatch::get_time();
                     let thread_id = sys::get_thread_id();
                     profile.add_record(ProfileRecord { thread_id, tag : TagType::Allocate(_layout.size()), time });
@@ -447,7 +497,7 @@ pub mod internal {
                 let tag_time = profile.stopwatch.get_milliseconds(&profile.start_time, &entry.time);
 
                 // Format the string
-                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":{},\"pid\":0{}}}",
+                write!(w, "{{\"name\":\"{}\",\"ph\":\"{}\",\"ts\":{},\"tid\":0,\"pid\":{}{}}}",
                     tag, type_tag, tag_time, stack.index, extra_buffer)?;
             }
             w.write(b"\n]\n}\n")?;

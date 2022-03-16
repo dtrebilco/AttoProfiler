@@ -7,3 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rs_tracing = { version = "1.0", features = ["rs_tracing"] }
+
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.0", features = ["profileapi", "synchapi", "dbghelp", "processthreadsapi"] }
+backtrace = "0.3"
